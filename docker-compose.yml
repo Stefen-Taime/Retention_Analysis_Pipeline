@@ -1,0 +1,143 @@
+networks:
+  retention:
+    driver: bridge
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.13
+    container_name: redpanda
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=redpanda:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - retention
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.6.1
+    container_name: redpanda-console
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - retention
+
+  clickhouse-server:
+    image: clickhouse/clickhouse-server:23.8.11-alpine
+    container_name: clickhouse-server
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse_init:/docker-entrypoint-initdb.d
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - retention
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  clickhouse-ui:
+    image: spoonest/clickhouse-tabix-web-client:stable
+    container_name: clickhouse-ui
+    ports:
+      - "8081:80"
+    networks:
+      - retention
+    depends_on:
+      clickhouse-server:
+        condition: service_healthy
+
+
+  data-producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: data-producer
+    networks:
+      - retention
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      REDPANDA_BROKER: redpanda:9092
+      TOPIC_NAME: viewer_events
+    restart: unless-stopped
+
+  api-server:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: api-server
+    ports:
+      - "8000:8000"
+    networks:
+      - retention
+    depends_on:
+      clickhouse-server:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse-server
+      CLICKHOUSE_PORT: 9000
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s  # Laisser le temps à FastAPI de démarrer
+
+  llm-interface:
+    build:
+      context: ./llm-interface
+      dockerfile: Dockerfile
+    container_name: llm-interface
+    ports:
+      - "8501:8501"
+    networks:
+      - retention
+    depends_on:
+      - api-server
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  redpanda_data:
+    driver: local
+  clickhouse_data:
+    driver: local

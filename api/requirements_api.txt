@@ -1,0 +1,4 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+clickhouse-driver==0.2.6
+pydantic==2.5.0
